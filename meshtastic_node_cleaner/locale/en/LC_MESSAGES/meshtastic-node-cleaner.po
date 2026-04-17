@@ -1,0 +1,193 @@
+# English source strings for meshtastic-node-cleaner.
+# This file is the translation template (POT).
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: en\n"
+
+msgid "Meshtastic Node Cleaner"
+msgstr "Meshtastic Node Cleaner"
+
+msgid "Clean nodes from your device's nodedb"
+msgstr "Clean nodes from your device's nodedb"
+
+msgid "Device nodes — [bold red]{count}[/bold red] partially-known node(s) to be deleted [bold red]✗[/bold red]"
+msgstr "Device nodes — [bold red]{count}[/bold red] partially-known node(s) to be deleted [bold red]✗[/bold red]"
+
+msgid "Device nodes — [bold red]{count}[/bold red] to be deleted, inactive for more than [bold yellow]{age}[/bold yellow] [bold red]✗[/bold red]"
+msgstr "Device nodes — [bold red]{count}[/bold red] to be deleted, inactive for more than [bold yellow]{age}[/bold yellow] [bold red]✗[/bold red]"
+
+msgid "✦ = partially known"
+msgstr "✦ = partially known"
+
+msgid "#"
+msgstr "#"
+
+msgid "Node ID"
+msgstr "Node ID"
+
+msgid "Long name"
+msgstr "Long name"
+
+msgid "Short"
+msgstr "Short"
+
+msgid "Hardware"
+msgstr "Hardware"
+
+msgid "Last seen"
+msgstr "Last seen"
+
+msgid "Ago"
+msgstr "Ago"
+
+msgid "entries (nodes with user.id only)"
+msgstr "entries (nodes with user.id only)"
+
+msgid "entries (all nodes)"
+msgstr "entries (all nodes)"
+
+msgid "My node num"
+msgstr "My node num"
+
+msgid "nodedb summary"
+msgstr "nodedb summary"
+
+msgid "nodesByNum is empty"
+msgstr "nodesByNum is empty"
+
+msgid "Full nodesByNum content"
+msgstr "Full nodesByNum content"
+
+msgid "num (hex)"
+msgstr "num (hex)"
+
+msgid "in nodes?"
+msgstr "in nodes?"
+
+msgid "me"
+msgstr "me"
+
+msgid "Nodes marked ✗ in 'in nodes?' are hidden without --debug"
+msgstr "Nodes marked ✗ in 'in nodes?' are hidden without --debug"
+
+msgid "[bold green]{success}[/bold green] of [bold]{total}[/bold] node(s) removed."
+msgstr "[bold green]{success}[/bold green] of [bold]{total}[/bold] node(s) removed."
+
+msgid "Result"
+msgstr "Result"
+
+msgid "Never seen"
+msgstr "Never seen"
+
+msgid "Invalid duration format: '{value}'. Use e.g. 30m, 24h, 7d, 2w"
+msgstr "Invalid duration format: '{value}'. Use e.g. 30m, 24h, 7d, 2w"
+
+msgid "Remove nodes from a Meshtastic device's nodedb."
+msgstr "Remove nodes from a Meshtastic device's nodedb."
+
+msgid "Examples:\n  %(prog)s --host 192.168.1.10 --older-than 7d\n  %(prog)s --device /dev/ttyUSB0 --older-than 24h\n  %(prog)s --host 192.168.1.10 --purge-unknown"
+msgstr "Examples:\n  %(prog)s --host 192.168.1.10 --older-than 7d\n  %(prog)s --device /dev/ttyUSB0 --older-than 24h\n  %(prog)s --host 192.168.1.10 --purge-unknown"
+
+msgid "Connect via TCP"
+msgstr "Connect via TCP"
+
+msgid "Connect via serial (e.g. /dev/ttyUSB0)"
+msgstr "Connect via serial (e.g. /dev/ttyUSB0)"
+
+msgid "TCP port (default: 4403)"
+msgstr "TCP port (default: 4403)"
+
+msgid "Delete all nodes (known and unknown) with no activity for longer than this duration (e.g. 30m, 24h, 7d, 2w). Default: 7d"
+msgstr "Delete all nodes (known and unknown) with no activity for longer than this duration (e.g. 30m, 24h, 7d, 2w). Default: 7d"
+
+msgid "Delete only partially-known nodes (those without complete NodeInfo), regardless of age"
+msgstr "Delete only partially-known nodes (those without complete NodeInfo), regardless of age"
+
+msgid "Column to sort by. Choices: {choices}. Default: date"
+msgstr "Column to sort by. Choices: {choices}. Default: date"
+
+msgid "Reverse the sort order. For 'date': show oldest first. For 'name'/'id'/'hardware': Z→A order"
+msgstr "Reverse the sort order. For 'date': show oldest first. For 'name'/'id'/'hardware': Z→A order"
+
+msgid "Skip confirmation prompt and delete immediately"
+msgstr "Skip confirmation prompt and delete immediately"
+
+msgid "Increase verbosity. Use -v for INFO-level output (connection details, node counts) and -vv for DEBUG-level output (full nodedb dump, raw processing info)"
+msgstr "Increase verbosity. Use -v for INFO-level output (connection details, node counts) and -vv for DEBUG-level output (full nodedb dump, raw processing info)"
+
+msgid "Connecting via TCP to"
+msgstr "Connecting via TCP to"
+
+msgid "Connecting via serial to"
+msgstr "Connecting via serial to"
+
+msgid "Serial port detected:"
+msgstr "Serial port detected:"
+
+msgid "Multiple serial ports detected:"
+msgstr "Multiple serial ports detected:"
+
+msgid "Using [bold]{port}[/bold]. Use --device to specify another."
+msgstr "Using [bold]{port}[/bold]. Use --device to specify another."
+
+msgid "No serial device detected. Trying TCP on localhost…"
+msgstr "No serial device detected. Trying TCP on localhost…"
+
+msgid "Connection error:"
+msgstr "Connection error:"
+
+msgid "Fetching node list…"
+msgstr "Fetching node list…"
+
+msgid "The device has no nodes in its nodedb."
+msgstr "The device has no nodes in its nodedb."
+
+msgid "All clean!"
+msgstr "All clean!"
+
+msgid "No partially-known nodes found."
+msgstr "No partially-known nodes found."
+
+msgid "No nodes inactive for more than [yellow]{age}[/yellow]."
+msgstr "No nodes inactive for more than [yellow]{age}[/yellow]."
+
+msgid "About to remove [red]{count}[/red] of [white]{total}[/white] node(s)."
+msgstr "About to remove [red]{count}[/red] of [white]{total}[/white] node(s)."
+
+msgid "Confirm deletion?"
+msgstr "Confirm deletion?"
+
+msgid "Removed: [cyan]{node_id}[/cyan] ({name})"
+msgstr "Removed: [cyan]{node_id}[/cyan] ({name})"
+
+msgid "Error removing {node_id}: {exc}"
+msgstr "Error removing {node_id}: {exc}"
+
+msgid "Operation cancelled. No nodes were removed."
+msgstr "Operation cancelled. No nodes were removed."
+
+msgid "Force serial connection. DEVICE (e.g. /dev/ttyUSB0) is optional; if omitted, serial ports are auto-detected. Never falls back to TCP"
+msgstr "Force serial connection. DEVICE (e.g. /dev/ttyUSB0) is optional; if omitted, serial ports are auto-detected. Never falls back to TCP"
+
+msgid "Force TCP connection. HOST can be a hostname, host:port, or http://host:port URL. Defaults to localhost if omitted. Never falls back to serial"
+msgstr "Force TCP connection. HOST can be a hostname, host:port, or http://host:port URL. Defaults to localhost if omitted. Never falls back to serial"
+
+msgid "No serial device found. Connect a device or use -t / --tcp to connect via TCP."
+msgstr "No serial device found. Connect a device or use -t / --tcp to connect via TCP."
+
+msgid "Using [bold]{port}[/bold]. Use --serial to specify another."
+msgstr "Using [bold]{port}[/bold]. Use --serial to specify another."
+
+msgid "Host cannot be empty. Use e.g. 192.168.1.10 or 192.168.1.10:5000"
+msgstr "Host cannot be empty. Use e.g. 192.168.1.10 or 192.168.1.10:5000"
+
+msgid "Invalid host: '{value}'"
+msgstr "Invalid host: '{value}'"
+
+msgid "Examples:\n  %(prog)s                           # auto-detect\n  %(prog)s -s                        # force serial, auto-detect port\n  %(prog)s -s /dev/ttyUSB0           # force serial, specific device\n  %(prog)s -t                        # force TCP, localhost\n  %(prog)s -t 192.168.1.10           # force TCP, specific host\n  %(prog)s -t 192.168.1.10:5000      # force TCP, host + port\n  %(prog)s -t 192.168.1.10 --older-than 24h\n  %(prog)s -s --purge-unknown"
+msgstr "Examples:\n  %(prog)s                           # auto-detect\n  %(prog)s -s                        # force serial, auto-detect port\n  %(prog)s -s /dev/ttyUSB0           # force serial, specific device\n  %(prog)s -t                        # force TCP, localhost\n  %(prog)s -t 192.168.1.10           # force TCP, specific host\n  %(prog)s -t 192.168.1.10:5000      # force TCP, host + port\n  %(prog)s -t 192.168.1.10 --older-than 24h\n  %(prog)s -s --purge-unknown"
+
+msgid "to delete?"
+msgstr "to delete?"
