@@ -115,7 +115,7 @@ def main() -> None:
             success = 0
             for node in to_delete:
                 try:
-                    iface.removeNode(node["num"])
+                    iface.localNode.removeNode(node["num"])
                     console.print(
                         "  [green]✓[/green] " +
                         _("Removed: [cyan]{node_id}[/cyan] ({name})").format(
