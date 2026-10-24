@@ -2,21 +2,23 @@
 //!
 //! The `meshtastic` crate only exposes a raw `FromRadio` stream, so the
 //! nodedb is rebuilt here from the packets the device sends during the
-//! config handshake, and node removal is a hand-built admin packet.
+//! config handshake, and admin requests (node removal, clock setting) are
+//! hand-built packets.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, anyhow, bail};
 use log::{debug, info, warn};
 use meshtastic::Message;
-use meshtastic::api::{ConnectedStreamApi, StreamApi, StreamHandle};
+use meshtastic::api::{ConnectedStreamApi, StreamApi};
 use meshtastic::packet::PacketReceiver;
-use meshtastic::protobufs::{self, from_radio, mesh_packet, to_radio};
+use meshtastic::protobufs::{self, admin_message, from_radio, mesh_packet, to_radio};
 use meshtastic::utils;
 use serialport::SerialPortType;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{Instant, timeout_at};
+
+use crate::fl;
 
 /// Standard Meshtastic TCP port.
 pub const DEFAULT_TCP_PORT: u16 = 4403;
@@ -39,6 +41,13 @@ pub enum Target {
     Auto,
 }
 
+/// A concrete device address, once auto-detection has been resolved.
+#[derive(Debug, Clone)]
+pub enum Endpoint {
+    Serial(String),
+    Tcp(String, u16),
+}
+
 /// An open, configured session with a Meshtastic device.
 pub struct Device {
     api: ConnectedStreamApi,
@@ -50,23 +59,29 @@ pub struct Device {
 }
 
 impl Device {
-    /// Connect to `target`, run the config handshake and download the nodedb.
-    pub async fn connect(target: &Target) -> Result<Self> {
-        let (rx, api) = match target {
-            Target::Tcp(host, port) => open_tcp(host, *port).await?,
-            Target::Serial(Some(dev)) => open_serial(dev).await?,
-            Target::Serial(None) => {
-                let port = detect_serial_port()?
-                    .context("no serial device found; use -t to connect via TCP")?;
-                open_serial(&port).await?
+    /// Connect to `endpoint`, run the config handshake and download the nodedb.
+    pub async fn connect(endpoint: &Endpoint) -> Result<Self> {
+        let (rx, api) = match endpoint {
+            Endpoint::Serial(dev) => {
+                info!("connecting via serial to {dev}");
+                // Assert both DTR and RTS, as pyserial does.  The crate default
+                // (DTR on, RTS off) drives GPIO0 low through the usual ESP32
+                // auto-reset circuit: that is the user button on many boards,
+                // so the device sees a long press, and a reboot in that state
+                // lands in the bootloader.
+                let handle = utils::stream::build_serial_stream(
+                    dev.clone(),
+                    None,
+                    Some(true),
+                    Some(true),
+                )?;
+                StreamApi::new().connect(handle).await
             }
-            Target::Auto => match detect_serial_port()? {
-                Some(port) => open_serial(&port).await?,
-                None => {
-                    info!("no serial device detected, trying TCP on localhost");
-                    open_tcp("localhost", DEFAULT_TCP_PORT).await?
-                }
-            },
+            Endpoint::Tcp(host, port) => {
+                info!("connecting via TCP to {host}:{port}");
+                let handle = utils::stream::build_tcp_stream(format!("{host}:{port}")).await?;
+                StreamApi::new().connect(handle).await
+            }
         };
 
         let config_id: u32 = utils::generate_rand_id();
@@ -88,8 +103,8 @@ impl Device {
         loop {
             let packet = timeout_at(deadline, self.rx.recv())
                 .await
-                .context("timed out waiting for the device nodedb")?
-                .context("connection closed while reading the nodedb")?;
+                .map_err(|_| anyhow!(fl!("error-config-timeout")))?
+                .ok_or_else(|| anyhow!(fl!("error-connection-closed")))?;
 
             match packet.payload_variant {
                 Some(from_radio::PayloadVariant::MyInfo(info)) => {
@@ -108,7 +123,7 @@ impl Device {
             }
         }
         if self.my_node_num == 0 {
-            bail!("the device did not report its own node number");
+            bail!(fl!("error-no-my-info"));
         }
         Ok(())
     }
@@ -119,10 +134,22 @@ impl Device {
     /// `Ok(false)` when no acknowledgement arrived in time (the removal may
     /// still have been applied).
     pub async fn remove_node(&mut self, node_num: u32) -> Result<bool> {
+        debug!("removing !{node_num:08x}");
+        self.send_admin(admin_message::PayloadVariant::RemoveByNodenum(node_num))
+            .await
+    }
+
+    /// Set the device clock to `epoch_secs` (Unix time).
+    pub async fn set_time(&mut self, epoch_secs: u32) -> Result<bool> {
+        debug!("setting device time to {epoch_secs}");
+        self.send_admin(admin_message::PayloadVariant::SetTimeOnly(epoch_secs))
+            .await
+    }
+
+    /// Send an admin request to the connected node and wait for its ack.
+    async fn send_admin(&mut self, request: admin_message::PayloadVariant) -> Result<bool> {
         let admin = protobufs::AdminMessage {
-            payload_variant: Some(protobufs::admin_message::PayloadVariant::RemoveByNodenum(
-                node_num,
-            )),
+            payload_variant: Some(request),
             session_passkey: Vec::new(),
         };
         // Built by hand instead of using send_mesh_packet() so that we know
@@ -144,7 +171,7 @@ impl Device {
         self.api
             .send_to_radio_packet(Some(to_radio::PayloadVariant::Packet(packet)))
             .await?;
-        debug!("sent remove_by_nodenum !{node_num:08x} (packet id {packet_id:#x})");
+        debug!("sent admin packet {packet_id:#x}");
 
         self.wait_for_ack(packet_id).await
     }
@@ -157,7 +184,7 @@ impl Device {
                 warn!("no acknowledgement for request {request_id:#x}");
                 return Ok(false);
             };
-            let packet = packet.context("connection closed while waiting for ack")?;
+            let packet = packet.ok_or_else(|| anyhow!(fl!("error-connection-closed")))?;
 
             let Some(from_radio::PayloadVariant::Packet(mp)) = packet.payload_variant else {
                 continue;
@@ -177,7 +204,7 @@ impl Device {
                     let reason = protobufs::routing::Error::try_from(code)
                         .map(|e| e.as_str_name())
                         .unwrap_or("UNKNOWN");
-                    bail!("device rejected the request: {reason}");
+                    bail!(fl!("error-rejected", reason = reason));
                 }
                 _ => return Ok(true),
             }
@@ -191,46 +218,24 @@ impl Device {
     }
 }
 
-async fn open<S>(
-    handle: StreamHandle<S>,
-) -> (
-    PacketReceiver,
-    ConnectedStreamApi<meshtastic::api::state::Connected>,
-)
-where
-    S: AsyncReadExt + AsyncWriteExt + Send + 'static,
-{
-    StreamApi::new().connect(handle).await
-}
+/// USB vendor ids of the serial bridges and MCUs found on Meshtastic boards.
+const KNOWN_VIDS: &[u16] = &[
+    0x10c4, // Silicon Labs CP210x
+    0x1a86, // WCH CH340 / CH9102
+    0x0403, // FTDI
+    0x303a, // Espressif native USB
+    0x239a, // Adafruit (nRF52 / RAK bootloaders)
+    0x2886, // Seeed
+    0x2e8a, // Raspberry Pi RP2040
+];
 
-async fn open_serial(
-    device: &str,
-) -> Result<(
-    PacketReceiver,
-    ConnectedStreamApi<meshtastic::api::state::Connected>,
-)> {
-    info!("connecting via serial to {device}");
-    let handle = utils::stream::build_serial_stream(device.to_string(), None, None, None)?;
-    Ok(open(handle).await)
-}
-
-async fn open_tcp(
-    host: &str,
-    port: u16,
-) -> Result<(
-    PacketReceiver,
-    ConnectedStreamApi<meshtastic::api::state::Connected>,
-)> {
-    info!("connecting via TCP to {host}:{port}");
-    let handle = utils::stream::build_tcp_stream(format!("{host}:{port}")).await?;
-    Ok(open(handle).await)
-}
-
-/// Return the first USB serial port, if any.
+/// List USB serial ports, likely Meshtastic devices first.
 ///
 /// Only USB ports are considered, which leaves out the built-in `/dev/ttyS*`
-/// UARTs that the generic enumeration also reports.
-fn detect_serial_port() -> Result<Option<String>> {
+/// UARTs that the generic enumeration also reports.  Ports from vendors not
+/// in [`KNOWN_VIDS`] are kept, after the known ones, so unusual boards still
+/// work.
+pub fn serial_ports() -> Result<Vec<String>> {
     let mut ports: Vec<_> = serialport::available_ports()?
         .into_iter()
         .filter_map(|p| match p.port_type {
@@ -238,7 +243,7 @@ fn detect_serial_port() -> Result<Option<String>> {
             _ => None,
         })
         .collect();
-    ports.sort_by(|a, b| a.0.cmp(&b.0));
+    ports.sort_by_key(|(name, usb)| (!KNOWN_VIDS.contains(&usb.vid), name.clone()));
 
     for (name, usb) in &ports {
         debug!(
@@ -248,11 +253,5 @@ fn detect_serial_port() -> Result<Option<String>> {
             usb.product.as_deref().unwrap_or("?")
         );
     }
-    if ports.len() > 1 {
-        warn!(
-            "multiple serial ports found, using {}; use -s DEVICE to choose another",
-            ports[0].0
-        );
-    }
-    Ok(ports.into_iter().next().map(|(name, _)| name))
+    Ok(ports.into_iter().map(|(name, _)| name).collect())
 }

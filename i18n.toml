@@ -1,0 +1,5 @@
+# Fluent localisation, embedded in the binary at build time.
+fallback_language = "en"
+
+[fluent]
+assets_dir = "i18n"

@@ -1,202 +1,305 @@
-//! Meshtastic Node Cleaner — proof of concept.
-//!
-//! Connects to a device, dumps its nodedb and, only when explicitly asked
-//! with `--remove`, deletes a single node.  Read-only by default.
+//! Meshtastic Node Cleaner — remove stale or partially-known nodes from a
+//! Meshtastic device's nodedb.
 
+mod cli;
 mod device;
+mod display;
+mod i18n;
+mod nodes;
 
+use std::io::{BufRead, Write};
+use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
-use clap::Parser;
-use meshtastic::protobufs::{HardwareModel, NodeInfo};
+use anyhow::{Result, anyhow};
+use console::style;
 
-use device::{DEFAULT_TCP_PORT, Device, Target};
+use cli::Cli;
+use device::{DEFAULT_TCP_PORT, Device, Endpoint, Target};
+use nodes::{Selection, Skip, node_id};
 
-#[derive(Parser, Debug)]
-#[command(
-    version,
-    about = "Remove nodes from a Meshtastic device's nodedb (PoC)"
-)]
-struct Cli {
-    /// Force serial connection; DEVICE is auto-detected when omitted
-    #[arg(short, long, value_name = "DEVICE", num_args = 0..=1,
-          default_missing_value = "", conflicts_with = "tcp")]
-    serial: Option<String>,
-
-    /// Force TCP connection; HOST may be host, host:port or http://host:port
-    #[arg(short, long, value_name = "HOST", num_args = 0..=1,
-          default_missing_value = "localhost", value_parser = parse_host)]
-    tcp: Option<(String, u16)>,
-
-    /// Remove this node (e.g. !aabbccdd) after showing the nodedb
-    #[arg(long, value_name = "NODE", value_parser = parse_node_id)]
-    remove: Option<u32>,
-
-    /// Increase verbosity (-v info, -vv debug)
-    #[arg(short, long, action = clap::ArgAction::Count)]
-    verbose: u8,
-}
-
-/// Parse `host`, `host:port` or `scheme://host[:port]` into host and port.
-fn parse_host(value: &str) -> Result<(String, u16), String> {
-    let raw = value.trim();
-    let raw = raw.split_once("://").map_or(raw, |(_, rest)| rest);
-    let raw = raw.trim_end_matches('/');
-    let (host, port) = match raw.rsplit_once(':') {
-        // An IPv6 address without brackets has several colons and no port.
-        Some((h, p)) if !h.contains(':') || h.ends_with(']') => {
-            let port = p
-                .parse()
-                .map_err(|_| format!("invalid port in '{value}'"))?;
-            (h, port)
-        }
-        _ => (raw, DEFAULT_TCP_PORT),
-    };
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-    if host.is_empty() {
-        return Err(format!("invalid host: '{value}'"));
-    }
-    Ok((host.to_lowercase(), port))
-}
-
-/// Parse a node id given as `!aabbccdd`, `0xaabbccdd` or a decimal number.
-fn parse_node_id(value: &str) -> Result<u32, String> {
-    let v = value.trim();
-    let parsed = if let Some(hex) = v.strip_prefix('!').or_else(|| v.strip_prefix("0x")) {
-        u32::from_str_radix(hex, 16)
-    } else {
-        v.parse()
-    };
-    parsed.map_err(|_| format!("invalid node id: '{value}'"))
-}
-
-fn human_ago(secs: u64) -> String {
-    let (d, h, m) = (secs / 86400, secs % 86400 / 3600, secs % 3600 / 60);
-    match (d, h) {
-        (0, 0) => format!("{m}m"),
-        (0, _) => format!("{h}h {m}m"),
-        _ => format!("{d}d {h}h"),
-    }
-}
-
-fn print_nodes(device: &Device) {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-
-    let mut nodes: Vec<&NodeInfo> = device.nodes.values().collect();
-    // Own node first, then most recently heard first.
-    nodes.sort_by_key(|n| (n.num != device.my_node_num, std::cmp::Reverse(n.last_heard)));
-
-    println!(
-        "{:<10} {:<4} {:<30} {:<6} {:<20} {:>10}",
-        "ID", "FLAG", "LONG NAME", "SHORT", "HARDWARE", "AGO"
-    );
-    for n in nodes {
-        let user = n.user.as_ref();
-        let hw = user
-            .and_then(|u| HardwareModel::try_from(u.hw_model).ok())
-            .map_or("—", |h| h.as_str_name());
-        let unknown = user.is_none_or(|u| u.hw_model == HardwareModel::Unset as i32);
-        let flags: String = [
-            (n.num == device.my_node_num, '★'),
-            (n.is_favorite, 'F'),
-            (n.is_ignored, 'I'),
-            (unknown, '?'),
-        ]
-        .iter()
-        .filter_map(|(on, c)| on.then_some(*c))
-        .collect();
-        let ago = if n.last_heard == 0 {
-            "never".to_string()
-        } else {
-            human_ago(now.saturating_sub(n.last_heard.into()))
-        };
-        println!(
-            "!{:08x} {:<4} {:<30} {:<6} {:<20} {:>10}",
-            n.num,
-            flags,
-            user.map_or("—", |u| u.long_name.as_str()),
-            user.map_or("—", |u| u.short_name.as_str()),
-            hw,
-            ago,
-        );
-    }
-    println!(
-        "\n{} node(s). Flags: ★ own, F favorite, I ignored, ? partially known",
-        device.nodes.len()
-    );
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
+fn main() -> ExitCode {
+    let cli = cli::parse();
 
     let level = ["warn", "info", "debug"][usize::from(cli.verbose.min(2))];
     env_logger::Builder::from_env(
         env_logger::Env::default()
             .default_filter_or(format!("warn,meshtastic_node_cleaner={level}")),
     )
+    .format_timestamp(None)
     .init();
 
-    let target = match (&cli.serial, &cli.tcp) {
-        (_, Some((host, port))) => Target::Tcp(host.clone(), *port),
-        (Some(dev), _) if dev.is_empty() => Target::Serial(None),
-        (Some(dev), _) => Target::Serial(Some(dev.clone())),
-        (None, None) => Target::Auto,
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => return fail(&e.into()),
     };
-
-    let mut device = Device::connect(&target).await.context("connection error")?;
-    print_nodes(&device);
-
-    let result = match cli.remove {
-        Some(num) if num == device.my_node_num => {
-            Err(anyhow::anyhow!("refusing to remove own node"))
-        }
-        Some(num) if !device.nodes.contains_key(&num) => {
-            Err(anyhow::anyhow!("node !{num:08x} is not in the nodedb"))
-        }
-        Some(num) => match device.remove_node(num).await {
-            Ok(true) => {
-                println!("Removed !{num:08x} (acknowledged by device)");
-                Ok(())
-            }
-            Ok(false) => {
-                println!("Sent removal of !{num:08x}, but the device did not acknowledge it");
-                Ok(())
-            }
-            Err(e) => Err(e),
-        },
-        None => Ok(()),
-    };
-
-    device.disconnect().await?;
-    result
+    match runtime.block_on(run(&cli)) {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
+        Err(e) => fail(&e),
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+fn fail(error: &anyhow::Error) -> ExitCode {
+    eprintln!("{} {error:#}", style(fl!("error")).red().bold());
+    ExitCode::FAILURE
+}
 
-    #[test]
-    fn host_variants() {
-        let h = |s| parse_host(s).unwrap();
-        assert_eq!(h("Node.local"), ("node.local".into(), 4403));
-        assert_eq!(h("192.168.1.10:5000"), ("192.168.1.10".into(), 5000));
-        assert_eq!(h("http://10.0.0.1"), ("10.0.0.1".into(), 4403));
-        assert_eq!(h("http://10.0.0.1:1234/"), ("10.0.0.1".into(), 1234));
-        assert_eq!(h("[fe80::1]:4000"), ("fe80::1".into(), 4000));
-        assert_eq!(h("fe80::1"), ("fe80::1".into(), 4403));
-        assert!(parse_host("").is_err());
-        assert!(parse_host("host:abc").is_err());
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Connect, show the plan and remove the selected nodes.  Returns whether
+/// every requested action succeeded.
+async fn run(cli: &Cli) -> Result<bool> {
+    display::banner();
+
+    let endpoint = resolve_endpoint(&cli.target())?;
+    let mut device = Device::connect(&endpoint)
+        .await
+        .map_err(|e| e.context(fl!("error-connect")))?;
+
+    let result = clean(cli, &mut device).await;
+    // Always release the serial port or socket, but report the first error.
+    let closed = device.disconnect().await;
+    let ok = result?;
+    closed?;
+    Ok(ok)
+}
+
+/// Turn the requested target into a concrete endpoint, auto-detecting the
+/// serial port when needed.
+fn resolve_endpoint(target: &Target) -> Result<Endpoint> {
+    let endpoint = match target {
+        Target::Tcp(host, port) => Endpoint::Tcp(host.clone(), *port),
+        Target::Serial(Some(dev)) => Endpoint::Serial(dev.clone()),
+        Target::Serial(None) | Target::Auto => {
+            let ports = device::serial_ports()?;
+            match ports.first() {
+                Some(port) => {
+                    if ports.len() > 1 {
+                        println!(
+                            "{}",
+                            style(fl!(
+                                "serial-multiple",
+                                ports = ports.join(", "),
+                                port = port.as_str()
+                            ))
+                            .yellow()
+                        );
+                    }
+                    Endpoint::Serial(port.clone())
+                }
+                None if matches!(target, Target::Auto) => {
+                    println!("{}", style(fl!("serial-none-fallback")).yellow());
+                    Endpoint::Tcp("localhost".into(), DEFAULT_TCP_PORT)
+                }
+                None => return Err(anyhow!(fl!("error-no-serial"))),
+            }
+        }
+    };
+    let address = match &endpoint {
+        Endpoint::Serial(dev) => fl!("connecting-serial", device = dev.as_str()),
+        Endpoint::Tcp(host, port) => fl!("connecting-tcp", address = format!("{host}:{port}")),
+    };
+    println!("{}", style(address).cyan());
+    Ok(endpoint)
+}
+
+async fn clean(cli: &Cli, device: &mut Device) -> Result<bool> {
+    let mut ok = true;
+
+    if cli.set_time {
+        let now = u32::try_from(now()).unwrap_or(u32::MAX);
+        match device.set_time(now).await {
+            Ok(true) => println!("{}", style(fl!("time-set")).green()),
+            Ok(false) => println!("{}", style(fl!("time-set-unconfirmed")).yellow()),
+            Err(e) => {
+                eprintln!("{} {e:#}", style(fl!("error-set-time")).red());
+                ok = false;
+            }
+        }
     }
 
-    #[test]
-    fn node_id_variants() {
-        assert_eq!(parse_node_id("!aabbccdd"), Ok(0xaabbccdd));
-        assert_eq!(parse_node_id("0x10"), Ok(16));
-        assert_eq!(parse_node_id("42"), Ok(42));
-        assert!(parse_node_id("!zz").is_err());
+    let selection = cli.selection();
+    let now = now();
+    let mut plan = nodes::plan(&device.nodes, device.my_node_num, &selection, now);
+    nodes::sort_nodes(&mut plan.nodes, cli.sort_by, cli.reverse);
+
+    println!(
+        "{}",
+        style(fl!("nodedb-summary", count = device.nodes.len())).cyan()
+    );
+    println!();
+
+    if plan.nodes.is_empty() && plan.skipped.is_empty() {
+        display::panel(
+            &style(fl!("nodedb-empty")).yellow().to_string(),
+            console::Color::Yellow,
+        );
+        return Ok(ok);
     }
+
+    let to_delete = plan.delete_count();
+    println!("{}", style(selection_title(&selection, to_delete)).bold());
+    if !plan.nodes.is_empty() {
+        let own = matches!(selection, Selection::Filter { .. })
+            .then_some(plan.own.as_ref())
+            .flatten();
+        display::nodes_table(own, &plan.nodes, now);
+    } else {
+        println!();
+    }
+
+    print_notes(&plan, &selection);
+
+    if to_delete == 0 {
+        display::panel(
+            &format!(
+                "{} {}",
+                style(fl!("all-clean")).green().bold(),
+                fl!("nothing-to-delete")
+            ),
+            console::Color::Green,
+        );
+        return Ok(ok);
+    }
+
+    if cli.dry_run {
+        display::panel(
+            &format!(
+                "{} {}",
+                style(fl!("dry-run")).yellow().bold(),
+                fl!("dry-run-summary", count = to_delete)
+            ),
+            console::Color::Yellow,
+        );
+        return Ok(ok);
+    }
+
+    if !cli.yes && !confirm(&fl!("confirm", count = to_delete))? {
+        println!("{}", style(fl!("cancelled")).yellow());
+        return Ok(ok);
+    }
+
+    let mut removed = 0;
+    for node in plan.to_delete() {
+        let name = node.long_name.clone().unwrap_or_else(|| "—".into());
+        match device.remove_node(node.num).await {
+            Ok(true) => {
+                removed += 1;
+                println!(
+                    "  {} {}",
+                    style("✓").green(),
+                    fl!("removed", id = node.id(), name = name)
+                );
+            }
+            Ok(false) => {
+                removed += 1;
+                println!(
+                    "  {} {}",
+                    style("?").yellow(),
+                    fl!("removed-unconfirmed", id = node.id(), name = name)
+                );
+            }
+            Err(e) => {
+                ok = false;
+                println!(
+                    "  {} {}",
+                    style("✗").red(),
+                    fl!("remove-failed", id = node.id(), error = format!("{e:#}"))
+                );
+            }
+        }
+    }
+    println!();
+    display::panel(
+        &fl!("result", removed = removed, total = to_delete),
+        if removed == to_delete {
+            console::Color::Green
+        } else {
+            console::Color::Yellow
+        },
+    );
+    Ok(ok)
+}
+
+fn selection_title(selection: &Selection, count: usize) -> String {
+    let criteria = match selection {
+        Selection::Explicit(_) => fl!("criteria-explicit"),
+        Selection::Filter {
+            unknown: true,
+            older_than: None,
+            ..
+        } => fl!("criteria-unknown"),
+        Selection::Filter {
+            unknown,
+            older_than: Some(age),
+            include_never,
+        } => {
+            let age = nodes::human_delta(age.as_secs());
+            let base = if *unknown {
+                fl!("criteria-unknown-older", age = age)
+            } else {
+                fl!("criteria-older", age = age)
+            };
+            if *include_never {
+                format!("{base} {}", fl!("criteria-include-never"))
+            } else {
+                base
+            }
+        }
+        Selection::Filter { .. } => String::new(),
+    };
+    format!("{} — {criteria}", fl!("to-delete", count = count))
+}
+
+/// Explain nodes that were left out of the removal.
+fn print_notes(plan: &nodes::Plan, selection: &Selection) {
+    let mut printed = false;
+    let mut note = |text: String| {
+        println!("{}", style(text).yellow());
+        printed = true;
+    };
+
+    for skip in &plan.skipped {
+        note(match *skip {
+            Skip::NotFound(num) => fl!("skip-not-found", id = node_id(num)),
+            Skip::Own(num) => fl!("skip-own", id = node_id(num)),
+            Skip::Favorite(num) => fl!("skip-favorite", id = node_id(num)),
+            Skip::Ignored(num) => fl!("skip-ignored", id = node_id(num)),
+        });
+    }
+    if matches!(selection, Selection::Filter { .. }) {
+        let protected = plan.protected_count();
+        if protected > 0 {
+            note(fl!("note-protected", count = protected));
+        }
+    }
+    let never = plan.never_heard_kept(selection);
+    if never > 0 {
+        note(fl!("note-never-heard", count = never));
+    }
+    if printed {
+        println!();
+    }
+}
+
+/// Ask a yes/no question on the terminal; anything but an explicit yes
+/// (including end of input) is a no.
+fn confirm(question: &str) -> Result<bool> {
+    print!("{} {} ", style(question).bold(), fl!("confirm-hint"));
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    let answer = answer.trim().to_lowercase();
+    Ok(!answer.is_empty()
+        && fl!("confirm-yes-answers")
+            .split(',')
+            .any(|yes| yes.trim() == answer))
 }
