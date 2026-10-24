@@ -1,8 +1,8 @@
 [package]
-name = "meshtastic-node-cleaner"
+name = "meshtastic-node-manager"
 version = "0.1.0"
 edition = "2024"
-description = "Remove stale nodes from a Meshtastic device's nodedb"
+description = "Manage the nodedb of a Meshtastic device"
 license-file = "LICENSE"
 readme = "README.md"
 

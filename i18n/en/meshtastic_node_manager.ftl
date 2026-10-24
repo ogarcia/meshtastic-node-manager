@@ -1,41 +1,51 @@
 ## Application
 
-app-name = Meshtastic Node Cleaner
-app-tagline = Clean nodes from your device's nodedb
-about = Remove stale or partially-known nodes from a Meshtastic device's nodedb.
+app-name = Meshtastic Node Manager
+app-tagline = Manage your device's nodedb
+about = Inspect and clean the nodedb of a Meshtastic device.
 
 ## Command-line help
 
 help-usage = Usage:
+heading-commands = Commands
 heading-connection = Connection
 heading-selection = Selection (default: --unknown)
 heading-output = Output
 heading-action = Action
+heading-arguments = Arguments
+cmd-list = Show the device nodedb (default command)
+cmd-clean = Remove partially-known or stale nodes
+cmd-remove = Remove specific nodes
+cmd-favorite = Mark nodes as favorites
+cmd-unfavorite = Remove nodes from favorites
+cmd-ignore = Ignore nodes
+cmd-unignore = Stop ignoring nodes
+cmd-set-time = Set the device clock to the system time
 help-serial = Connect via serial. DEVICE (e.g. /dev/ttyUSB0) is auto-detected when omitted. Never falls back to TCP
 help-tcp = Connect via TCP. HOST may be host, host:port or http://host:port; defaults to localhost:4403. Never falls back to serial
 help-unknown = Select partially-known nodes (no complete NodeInfo). This is the default when no other selection is given
 help-older-than = Select nodes not heard for longer than DURATION (e.g. 30m, 24h, 7d, 2w). Combined with --unknown, both must match
 help-include-never = With --older-than, also select nodes with no last-heard time
-help-remove = Remove exactly these nodes (e.g. !aabbccdd, 0xaabbccdd or a decimal number)
+help-nodes = Node ids: !aabbccdd, 0xaabbccdd or a decimal number
 help-sort-by = Column to sort the table by
 help-reverse = Reverse the sort order (date: oldest first; text: Z→A)
 help-verbose = Increase verbosity (-v connection details, -vv debug output)
 help-dry-run = Show what would be removed without changing anything
 help-yes = Remove without asking for confirmation
-help-set-time = Set the device clock to the system time before reading the nodedb
 help-help = Print help
 help-version = Print version
 help-examples =
     Examples:
-      meshtastic-node-cleaner                     Remove partially-known nodes, auto-detecting the device
-      meshtastic-node-cleaner -n                  Only show what would be removed
-      meshtastic-node-cleaner -s /dev/ttyUSB0     Use a specific serial device
-      meshtastic-node-cleaner -t 192.168.1.10     Connect via TCP
-      meshtastic-node-cleaner -o 30d              Remove nodes not heard for 30 days
-      meshtastic-node-cleaner -u -o 7d            Remove partially-known nodes not heard for 7 days
-      meshtastic-node-cleaner -r '!aabbccdd'      Remove one specific node
+      meshtastic-node-manager                            Show the nodedb, auto-detecting the device
+      meshtastic-node-manager -t 192.168.1.10            Show the nodedb of a device reachable via TCP
+      meshtastic-node-manager clean -n                   Show which partially-known nodes would be removed
+      meshtastic-node-manager clean -o 30d               Remove nodes not heard for 30 days
+      meshtastic-node-manager clean -u -o 7d             Remove partially-known nodes not heard for 7 days
+      meshtastic-node-manager remove '!aabbccdd'         Remove one specific node
+      meshtastic-node-manager unfavorite '!aabbccdd'     Unmark a favorite so that it can be removed
 
     Favorites and ignored nodes are never removed.
+    Use "meshtastic-node-manager <COMMAND> --help" for the options of each command.
 
 ## Argument errors
 
@@ -94,8 +104,8 @@ legend-unknown = partially known
 
 skip-not-found = { $id } is not in the nodedb.
 skip-own = { $id } is the device's own node and cannot be removed.
-skip-favorite = { $id } is a favorite and will not be removed; unmark it first.
-skip-ignored = { $id } is ignored and will not be removed; removing it would drop the ignore flag.
+skip-favorite = { $id } is a favorite and will not be removed; unmark it first with the unfavorite command.
+skip-ignored = { $id } is ignored and will not be removed, as that would drop the ignore flag; use the unignore command first.
 note-protected = { $count ->
     [one] { $count } matching node is kept because it is a favorite or ignored.
    *[other] { $count } matching nodes are kept because they are favorites or ignored.
@@ -103,7 +113,7 @@ note-protected = { $count ->
 note-never-heard = { $count ->
     [one] { $count } node has no last-heard time and was kept.
    *[other] { $count } nodes have no last-heard time and were kept.
-} The device probably had no valid clock when it heard them. Use --include-never to select them too, and --set-time to give the device the current time.
+} The device probably had no valid clock when it heard them. Use --include-never to select them too, and the set-time command to give the device the current time.
 
 ## Removal
 
@@ -129,3 +139,17 @@ result = { $total ->
     [one] { $removed } of { $total } node removed.
    *[other] { $removed } of { $total } nodes removed.
 }
+
+## Node flags
+
+flag-own = { $id } is the device's own node; skipped.
+flag-unconfirmed = Change for { $id } ({ $name }) sent, but not acknowledged
+flag-failed = Could not change { $id }: { $error }
+favorite-already = { $id } is already a favorite.
+favorite-not = { $id } is not a favorite.
+favorite-added = Added { $id } ({ $name }) to favorites
+favorite-removed = Removed { $id } ({ $name }) from favorites
+ignore-already = { $id } is already ignored.
+ignore-not = { $id } is not ignored.
+ignore-added = Now ignoring { $id } ({ $name })
+ignore-removed = No longer ignoring { $id } ({ $name })

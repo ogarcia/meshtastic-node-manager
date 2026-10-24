@@ -1,65 +1,87 @@
 //! Command-line interface.
 //!
-//! The argument set is declared with clap's derive API; [`command`] then
+//! The arguments are declared with clap's derive API; [`command`] then
 //! overlays the translated help texts, which have to be set at runtime.
 
 use std::time::Duration;
 
-use clap::{ArgAction, Args, Command, CommandFactory, FromArgMatches, Parser};
+use clap::{ArgAction, Args, Command, CommandFactory, FromArgMatches, Parser, Subcommand};
 
 use crate::device::{DEFAULT_TCP_PORT, Target};
 use crate::fl;
 use crate::nodes::{Selection, SortKey};
 
 #[derive(Parser, Debug)]
-#[command(name = "meshtastic-node-cleaner", version)]
-#[command(disable_help_flag = true, disable_version_flag = true)]
+#[command(name = "meshtastic-node-manager", version)]
+#[command(
+    disable_help_flag = true,
+    disable_version_flag = true,
+    disable_help_subcommand = true
+)]
 pub struct Cli {
-    #[command(flatten)]
-    pub connection: Connection,
+    #[arg(short, long, global = true, visible_alias = "port", value_name = "DEVICE",
+          num_args = 0..=1, default_missing_value = "", conflicts_with = "tcp")]
+    pub serial: Option<String>,
 
-    #[command(flatten)]
-    pub selection: SelectionArgs,
+    #[arg(short, long, global = true, visible_alias = "host", value_name = "HOST",
+          num_args = 0..=1, default_missing_value = "localhost", value_parser = parse_host)]
+    pub tcp: Option<(String, u16)>,
 
-    #[arg(long, value_enum, default_value_t = SortKey::Date)]
-    pub sort_by: SortKey,
-
-    #[arg(long)]
-    pub reverse: bool,
-
-    #[arg(short = 'n', long, conflicts_with_all = ["yes", "set_time"])]
-    pub dry_run: bool,
-
-    #[arg(short, long)]
-    pub yes: bool,
-
-    #[arg(long)]
-    pub set_time: bool,
-
-    #[arg(short, long, action = ArgAction::Count)]
+    #[arg(short, long, global = true, action = ArgAction::Count)]
     pub verbose: u8,
 
-    #[arg(short, long, action = ArgAction::Help)]
+    #[arg(short, long, global = true, action = ArgAction::Help)]
     help: Option<bool>,
 
     #[arg(short = 'V', long, action = ArgAction::Version)]
     version: Option<bool>,
+
+    /// What to do; lists the nodedb when omitted.
+    #[command(subcommand)]
+    pub command: Option<Cmd>,
 }
 
-#[derive(Args, Debug)]
-#[group(multiple = false)]
-pub struct Connection {
-    #[arg(short, long, visible_alias = "port", value_name = "DEVICE",
-          num_args = 0..=1, default_missing_value = "")]
-    pub serial: Option<String>,
-
-    #[arg(short, long, visible_alias = "host", value_name = "HOST",
-          num_args = 0..=1, default_missing_value = "localhost", value_parser = parse_host)]
-    pub tcp: Option<(String, u16)>,
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+#[command(disable_help_flag = true)]
+pub enum Cmd {
+    List(ViewArgs),
+    Clean(CleanArgs),
+    Remove(RemoveArgs),
+    Favorite(NodeArgs),
+    Unfavorite(NodeArgs),
+    Ignore(NodeArgs),
+    Unignore(NodeArgs),
+    SetTime,
 }
 
-#[derive(Args, Debug)]
-pub struct SelectionArgs {
+impl Default for Cmd {
+    fn default() -> Self {
+        Cmd::List(ViewArgs::default())
+    }
+}
+
+/// Table sorting.
+#[derive(Args, Debug, Clone, Default, PartialEq, Eq)]
+pub struct ViewArgs {
+    #[arg(long, value_enum, default_value_t)]
+    pub sort_by: SortKey,
+
+    #[arg(long)]
+    pub reverse: bool,
+}
+
+/// Confirmation for commands that remove nodes.
+#[derive(Args, Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfirmArgs {
+    #[arg(short = 'n', long, conflicts_with = "yes")]
+    pub dry_run: bool,
+
+    #[arg(short, long)]
+    pub yes: bool,
+}
+
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
+pub struct CleanArgs {
     #[arg(short, long)]
     pub unknown: bool,
 
@@ -69,14 +91,42 @@ pub struct SelectionArgs {
     #[arg(long, requires = "older_than")]
     pub include_never: bool,
 
-    #[arg(short, long, value_name = "NODE", num_args = 1.., value_parser = parse_node_id,
-          conflicts_with_all = ["unknown", "older_than"])]
-    pub remove: Vec<u32>,
+    #[command(flatten)]
+    pub view: ViewArgs,
+
+    #[command(flatten)]
+    pub confirm: ConfirmArgs,
+}
+
+impl CleanArgs {
+    /// With no criterion at all, only partially-known nodes are selected.
+    pub fn selection(&self) -> Selection {
+        Selection::Filter {
+            unknown: self.unknown || self.older_than.is_none(),
+            older_than: self.older_than,
+            include_never: self.include_never,
+        }
+    }
+}
+
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
+pub struct RemoveArgs {
+    #[arg(value_name = "NODE", required = true, num_args = 1.., value_parser = parse_node_id)]
+    pub nodes: Vec<u32>,
+
+    #[command(flatten)]
+    pub confirm: ConfirmArgs,
+}
+
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
+pub struct NodeArgs {
+    #[arg(value_name = "NODE", required = true, num_args = 1.., value_parser = parse_node_id)]
+    pub nodes: Vec<u32>,
 }
 
 impl Cli {
     pub fn target(&self) -> Target {
-        match (&self.connection.serial, &self.connection.tcp) {
+        match (&self.serial, &self.tcp) {
             (_, Some((host, port))) => Target::Tcp(host.clone(), *port),
             (Some(dev), _) if dev.is_empty() => Target::Serial(None),
             (Some(dev), _) => Target::Serial(Some(dev.clone())),
@@ -84,18 +134,8 @@ impl Cli {
         }
     }
 
-    /// The selection requested on the command line.  With no selector at
-    /// all, only partially-known nodes are selected.
-    pub fn selection(&self) -> Selection {
-        let s = &self.selection;
-        if !s.remove.is_empty() {
-            return Selection::Explicit(s.remove.clone());
-        }
-        Selection::Filter {
-            unknown: s.unknown || s.older_than.is_none(),
-            older_than: s.older_than,
-            include_never: s.include_never,
-        }
+    pub fn action(&self) -> Cmd {
+        self.command.clone().unwrap_or_default()
     }
 }
 
@@ -107,58 +147,81 @@ pub fn parse() -> Cli {
 
 /// The clap command with translated help texts.
 pub fn command() -> Command {
-    let conn = fl!("heading-connection");
-    let sel = fl!("heading-selection");
-    let out = fl!("heading-output");
-    let act = fl!("heading-action");
+    localize(
+        Cli::command()
+            .about(fl!("about"))
+            .after_help(fl!("help-examples"))
+            .subcommand_help_heading(fl!("heading-commands")),
+    )
+}
 
-    Cli::command()
-        .about(fl!("about"))
-        .after_help(fl!("help-examples"))
-        .help_template(format!(
-            "{{about-with-newline}}\n{} {{usage}}\n\n{{all-args}}{{after-help}}",
-            fl!("help-usage")
-        ))
-        .mut_arg("serial", |a| {
-            a.help(fl!("help-serial")).help_heading(conn.clone())
-        })
-        .mut_arg("tcp", |a| {
-            a.help(fl!("help-tcp")).help_heading(conn.clone())
-        })
-        .mut_arg("unknown", |a| {
-            a.help(fl!("help-unknown")).help_heading(sel.clone())
-        })
-        .mut_arg("older_than", |a| {
-            a.help(fl!("help-older-than")).help_heading(sel.clone())
-        })
-        .mut_arg("include_never", |a| {
-            a.help(fl!("help-include-never")).help_heading(sel.clone())
-        })
-        .mut_arg("remove", |a| {
-            a.help(fl!("help-remove")).help_heading(sel.clone())
-        })
-        .mut_arg("sort_by", |a| {
-            a.help(fl!("help-sort-by")).help_heading(out.clone())
-        })
-        .mut_arg("reverse", |a| {
-            a.help(fl!("help-reverse")).help_heading(out.clone())
-        })
-        .mut_arg("verbose", |a| {
-            a.help(fl!("help-verbose")).help_heading(out.clone())
-        })
-        .mut_arg("dry_run", |a| {
-            a.help(fl!("help-dry-run")).help_heading(act.clone())
-        })
-        .mut_arg("yes", |a| a.help(fl!("help-yes")).help_heading(act.clone()))
-        .mut_arg("set_time", |a| {
-            a.help(fl!("help-set-time")).help_heading(act.clone())
-        })
-        .mut_arg("help", |a| {
-            a.help(fl!("help-help")).help_heading(out.clone())
-        })
-        .mut_arg("version", |a| {
-            a.help(fl!("help-version")).help_heading(out.clone())
-        })
+/// Translate the help of `cmd`, its arguments and its subcommands.
+fn localize(cmd: Command) -> Command {
+    let template = format!(
+        "{{about-with-newline}}\n{} {{usage}}\n\n{{all-args}}{{after-help}}",
+        fl!("help-usage")
+    );
+    let mut cmd = cmd.help_template(template);
+
+    let args: Vec<String> = cmd
+        .get_arguments()
+        .map(|a| a.get_id().to_string())
+        .collect();
+    for id in args {
+        if let Some((help, heading)) = arg_help(&id) {
+            cmd = cmd.mut_arg(id, |a| a.help(help).help_heading(heading));
+        }
+    }
+
+    let subcommands: Vec<String> = cmd
+        .get_subcommands()
+        .map(|s| s.get_name().to_string())
+        .collect();
+    for name in subcommands {
+        let about = command_about(&name);
+        cmd = cmd.mut_subcommand(name, |s| localize(s.about(about)));
+    }
+    cmd
+}
+
+/// Translated help text and section heading of an argument.
+fn arg_help(id: &str) -> Option<(String, String)> {
+    let connection = fl!("heading-connection");
+    let selection = fl!("heading-selection");
+    let output = fl!("heading-output");
+    let action = fl!("heading-action");
+    let arguments = fl!("heading-arguments");
+    Some(match id {
+        "serial" => (fl!("help-serial"), connection),
+        "tcp" => (fl!("help-tcp"), connection),
+        "verbose" => (fl!("help-verbose"), output),
+        "help" => (fl!("help-help"), output),
+        "version" => (fl!("help-version"), output),
+        "sort_by" => (fl!("help-sort-by"), output),
+        "reverse" => (fl!("help-reverse"), output),
+        "unknown" => (fl!("help-unknown"), selection),
+        "older_than" => (fl!("help-older-than"), selection),
+        "include_never" => (fl!("help-include-never"), selection),
+        "dry_run" => (fl!("help-dry-run"), action),
+        "yes" => (fl!("help-yes"), action),
+        "nodes" => (fl!("help-nodes"), arguments),
+        _ => return None,
+    })
+}
+
+/// Translated one-line description of a subcommand.
+fn command_about(name: &str) -> String {
+    match name {
+        "list" => fl!("cmd-list"),
+        "clean" => fl!("cmd-clean"),
+        "remove" => fl!("cmd-remove"),
+        "favorite" => fl!("cmd-favorite"),
+        "unfavorite" => fl!("cmd-unfavorite"),
+        "ignore" => fl!("cmd-ignore"),
+        "unignore" => fl!("cmd-unignore"),
+        "set-time" => fl!("cmd-set-time"),
+        _ => String::new(),
+    }
 }
 
 /// Parse a duration such as `30m`, `24h`, `7d` or `2w`.
@@ -223,9 +286,13 @@ mod tests {
     use rstest::rstest;
 
     fn parse_from(args: &[&str]) -> Result<Cli, clap::Error> {
-        let argv = std::iter::once("meshtastic-node-cleaner").chain(args.iter().copied());
+        let argv = std::iter::once("meshtastic-node-manager").chain(args.iter().copied());
         let matches = command().try_get_matches_from(argv)?;
         Cli::from_arg_matches(&matches)
+    }
+
+    fn cmd(args: &[&str]) -> Cmd {
+        parse_from(args).unwrap().action()
     }
 
     fn err_kind(args: &[&str]) -> ErrorKind {
@@ -235,6 +302,37 @@ mod tests {
     #[test]
     fn command_is_valid() {
         command().debug_assert();
+    }
+
+    fn assert_localized(cmd: &Command) {
+        for arg in cmd.get_arguments() {
+            let id = arg.get_id();
+            assert!(
+                arg.get_help().is_some(),
+                "{}: {id} has no help",
+                cmd.get_name()
+            );
+            assert!(
+                arg.get_help_heading().is_some(),
+                "{}: {id} has no heading",
+                cmd.get_name()
+            );
+        }
+        for sub in cmd.get_subcommands() {
+            assert!(
+                sub.get_about().is_some_and(|a| !a.to_string().is_empty()),
+                "{} has no about",
+                sub.get_name()
+            );
+            assert_localized(sub);
+        }
+    }
+
+    #[test]
+    fn everything_has_translated_help() {
+        let mut cmd = command();
+        cmd.build();
+        assert_localized(&cmd);
     }
 
     #[rstest]
@@ -305,19 +403,10 @@ mod tests {
     }
 
     #[test]
-    fn defaults() {
+    fn no_command_lists() {
         let cli = parse_from(&[]).unwrap();
         assert!(matches!(cli.target(), Target::Auto));
-        assert_eq!(
-            cli.selection(),
-            Selection::Filter {
-                unknown: true,
-                older_than: None,
-                include_never: false
-            }
-        );
-        assert_eq!(cli.sort_by, SortKey::Date);
-        assert!(!cli.reverse && !cli.dry_run && !cli.yes && !cli.set_time);
+        assert_eq!(cli.action(), Cmd::List(ViewArgs::default()));
         assert_eq!(cli.verbose, 0);
     }
 
@@ -325,6 +414,7 @@ mod tests {
     #[case(&["-s"])]
     #[case(&["--serial"])]
     #[case(&["--port"])]
+    #[case(&["list", "-s"])]
     fn serial_autodetect(#[case] args: &[&str]) {
         assert!(matches!(
             parse_from(args).unwrap().target(),
@@ -335,7 +425,8 @@ mod tests {
     #[rstest]
     #[case(&["-s", "/dev/ttyUSB0"])]
     #[case(&["--serial=/dev/ttyUSB0"])]
-    #[case(&["--port", "/dev/ttyUSB0"])]
+    #[case(&["--port", "/dev/ttyUSB0", "clean"])]
+    #[case(&["clean", "-s", "/dev/ttyUSB0"])]
     fn serial_device(#[case] args: &[&str]) {
         let Target::Serial(Some(dev)) = parse_from(args).unwrap().target() else {
             panic!("expected serial target");
@@ -348,8 +439,8 @@ mod tests {
     #[case(&["--tcp"], "localhost", 4403)]
     #[case(&["--host"], "localhost", 4403)]
     #[case(&["-t", "192.168.1.10"], "192.168.1.10", 4403)]
-    #[case(&["--tcp", "192.168.1.10:5000"], "192.168.1.10", 5000)]
-    #[case(&["--host", "http://node.local:1234"], "node.local", 1234)]
+    #[case(&["--tcp", "192.168.1.10:5000", "list"], "192.168.1.10", 5000)]
+    #[case(&["set-time", "--host", "http://node.local:1234"], "node.local", 1234)]
     fn tcp(#[case] args: &[&str], #[case] host: &str, #[case] port: u16) {
         let Target::Tcp(h, p) = parse_from(args).unwrap().target() else {
             panic!("expected TCP target");
@@ -365,10 +456,43 @@ mod tests {
     }
 
     #[test]
-    fn older_than_alone_selects_by_age_only() {
-        let cli = parse_from(&["--older-than", "30d"]).unwrap();
+    fn list_sorting() {
+        let Cmd::List(view) = cmd(&["list", "--sort-by", "name", "--reverse"]) else {
+            panic!("expected list");
+        };
+        assert_eq!(view.sort_by, SortKey::Name);
+        assert!(view.reverse);
+    }
+
+    fn clean(args: &[&str]) -> CleanArgs {
+        let argv: Vec<&str> = std::iter::once("clean")
+            .chain(args.iter().copied())
+            .collect();
+        match cmd(&argv) {
+            Cmd::Clean(c) => c,
+            other => panic!("expected clean, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clean_defaults_to_unknown() {
+        let c = clean(&[]);
         assert_eq!(
-            cli.selection(),
+            c.selection(),
+            Selection::Filter {
+                unknown: true,
+                older_than: None,
+                include_never: false
+            }
+        );
+        assert_eq!(c.view, ViewArgs::default());
+        assert_eq!(c.confirm, ConfirmArgs::default());
+    }
+
+    #[test]
+    fn clean_older_than_alone_selects_by_age_only() {
+        assert_eq!(
+            clean(&["--older-than", "30d"]).selection(),
             Selection::Filter {
                 unknown: false,
                 older_than: Some(Duration::from_secs(30 * 86_400)),
@@ -378,30 +502,59 @@ mod tests {
     }
 
     #[test]
-    fn unknown_and_older_than_combine() {
-        let cli = parse_from(&["-u", "-o", "2w", "--include-never"]).unwrap();
+    fn clean_unknown_and_older_than_combine() {
+        let c = clean(&["-u", "-o", "2w", "--include-never", "-n", "--sort-by", "id"]);
         assert_eq!(
-            cli.selection(),
+            c.selection(),
             Selection::Filter {
                 unknown: true,
                 older_than: Some(Duration::from_secs(14 * 86_400)),
                 include_never: true
             }
         );
+        assert!(c.confirm.dry_run);
+        assert_eq!(c.view.sort_by, SortKey::Id);
     }
 
     #[test]
-    fn remove_accepts_several_nodes() {
-        let cli = parse_from(&["-r", "!0000000a", "11", "--remove", "0xc"]).unwrap();
-        assert_eq!(cli.selection(), Selection::Explicit(vec![10, 11, 12]));
+    fn remove_takes_nodes_and_confirmation() {
+        let Cmd::Remove(r) = cmd(&["remove", "!0000000a", "11", "0xc", "-y"]) else {
+            panic!("expected remove");
+        };
+        assert_eq!(r.nodes, vec![10, 11, 12]);
+        assert!(r.confirm.yes && !r.confirm.dry_run);
+    }
+
+    #[rstest]
+    #[case("favorite")]
+    #[case("unfavorite")]
+    #[case("ignore")]
+    #[case("unignore")]
+    fn flag_commands_take_nodes(#[case] name: &str) {
+        let nodes = match cmd(&[name, "!0000000a", "11"]) {
+            Cmd::Favorite(n) | Cmd::Unfavorite(n) | Cmd::Ignore(n) | Cmd::Unignore(n) => n.nodes,
+            other => panic!("unexpected {other:?}"),
+        };
+        assert_eq!(nodes, vec![10, 11]);
+    }
+
+    #[test]
+    fn set_time() {
+        assert_eq!(cmd(&["set-time"]), Cmd::SetTime);
+    }
+
+    #[rstest]
+    #[case(&["remove"])]
+    #[case(&["favorite"])]
+    #[case(&["unignore"])]
+    fn node_commands_require_nodes(#[case] args: &[&str]) {
+        assert_eq!(err_kind(args), ErrorKind::MissingRequiredArgument);
     }
 
     #[rstest]
     #[case(&["-s", "-t"])]
-    #[case(&["-r", "!0000000a", "-u"])]
-    #[case(&["-r", "!0000000a", "-o", "7d"])]
-    #[case(&["-n", "-y"])]
-    #[case(&["-n", "--set-time"])]
+    #[case(&["clean", "-n", "-y"])]
+    #[case(&["remove", "10", "-n", "-y"])]
     fn conflicts(#[case] args: &[&str]) {
         assert_eq!(err_kind(args), ErrorKind::ArgumentConflict);
     }
@@ -409,16 +562,16 @@ mod tests {
     #[test]
     fn include_never_requires_older_than() {
         assert_eq!(
-            err_kind(&["--include-never"]),
+            err_kind(&["clean", "--include-never"]),
             ErrorKind::MissingRequiredArgument
         );
     }
 
     #[rstest]
-    #[case(&["--older-than", "7x"])]
+    #[case(&["clean", "--older-than", "7x"])]
     #[case(&["-t", "host:abc"])]
-    #[case(&["-r", "!zz"])]
-    #[case(&["--sort-by", "colour"])]
+    #[case(&["remove", "!zz"])]
+    #[case(&["list", "--sort-by", "colour"])]
     fn invalid_values(#[case] args: &[&str]) {
         assert!(matches!(
             err_kind(args),
@@ -427,17 +580,17 @@ mod tests {
     }
 
     #[rstest]
-    #[case("date", SortKey::Date)]
-    #[case("name", SortKey::Name)]
-    #[case("id", SortKey::Id)]
-    #[case("hardware", SortKey::Hardware)]
-    fn sort_by(#[case] value: &str, #[case] key: SortKey) {
-        assert_eq!(parse_from(&["--sort-by", value]).unwrap().sort_by, key);
+    #[case(&["clean", "-n", "--dry-run"])]
+    #[case(&["list", "-o", "7d"])]
+    #[case(&["favorite", "10", "-y"])]
+    #[case(&["help"])]
+    fn rejected(#[case] args: &[&str]) {
+        assert!(parse_from(args).is_err());
     }
 
     #[test]
     fn verbose_count() {
         assert_eq!(parse_from(&["-vv"]).unwrap().verbose, 2);
-        assert_eq!(parse_from(&["-v", "-v", "-v"]).unwrap().verbose, 3);
+        assert_eq!(parse_from(&["clean", "-v", "-v", "-v"]).unwrap().verbose, 3);
     }
 }

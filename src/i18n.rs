@@ -61,8 +61,8 @@ mod tests {
 
     #[test]
     fn translations_have_the_same_messages() {
-        let en = message_ids(include_str!("../i18n/en/meshtastic_node_cleaner.ftl"));
-        let es = message_ids(include_str!("../i18n/es/meshtastic_node_cleaner.ftl"));
+        let en = message_ids(include_str!("../i18n/en/meshtastic_node_manager.ftl"));
+        let es = message_ids(include_str!("../i18n/es/meshtastic_node_manager.ftl"));
         assert!(en.len() > 50);
         assert_eq!(en, es);
     }

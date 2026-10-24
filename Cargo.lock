@@ -759,7 +759,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "meshtastic-node-cleaner"
+name = "meshtastic-node-manager"
 version = "0.1.0"
 dependencies = [
  "anyhow",

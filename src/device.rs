@@ -2,7 +2,7 @@
 //!
 //! The `meshtastic` crate only exposes a raw `FromRadio` stream, so the
 //! nodedb is rebuilt here from the packets the device sends during the
-//! config handshake, and admin requests (node removal, clock setting) are
+//! config handshake, and admin requests (node removal, flags, clock) are
 //! hand-built packets.
 
 use std::collections::BTreeMap;
@@ -48,6 +48,13 @@ pub enum Endpoint {
     Tcp(String, u16),
 }
 
+/// Per-node flags stored in the nodedb.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeFlag {
+    Favorite,
+    Ignored,
+}
+
 /// An open, configured session with a Meshtastic device.
 pub struct Device {
     api: ConnectedStreamApi,
@@ -69,12 +76,8 @@ impl Device {
                 // auto-reset circuit: that is the user button on many boards,
                 // so the device sees a long press, and a reboot in that state
                 // lands in the bootloader.
-                let handle = utils::stream::build_serial_stream(
-                    dev.clone(),
-                    None,
-                    Some(true),
-                    Some(true),
-                )?;
+                let handle =
+                    utils::stream::build_serial_stream(dev.clone(), None, Some(true), Some(true))?;
                 StreamApi::new().connect(handle).await
             }
             Endpoint::Tcp(host, port) => {
@@ -137,6 +140,22 @@ impl Device {
         debug!("removing !{node_num:08x}");
         self.send_admin(admin_message::PayloadVariant::RemoveByNodenum(node_num))
             .await
+    }
+
+    /// Set or clear a per-node `flag`.
+    ///
+    /// Returns whether the device acknowledged the request, as
+    /// [`Device::remove_node`] does.
+    pub async fn set_flag(&mut self, node_num: u32, flag: NodeFlag, on: bool) -> Result<bool> {
+        debug!("setting {flag:?}={on} on !{node_num:08x}");
+        use admin_message::PayloadVariant as P;
+        let request = match (flag, on) {
+            (NodeFlag::Favorite, true) => P::SetFavoriteNode(node_num),
+            (NodeFlag::Favorite, false) => P::RemoveFavoriteNode(node_num),
+            (NodeFlag::Ignored, true) => P::SetIgnoredNode(node_num),
+            (NodeFlag::Ignored, false) => P::RemoveIgnoredNode(node_num),
+        };
+        self.send_admin(request).await
     }
 
     /// Set the device clock to `epoch_secs` (Unix time).

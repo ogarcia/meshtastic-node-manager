@@ -197,8 +197,9 @@ pub fn plan(
 }
 
 /// Column to sort the node table by.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum SortKey {
+    #[default]
     Date,
     Name,
     Id,

@@ -1,41 +1,51 @@
 ## Aplicación
 
-app-name = Meshtastic Node Cleaner
-app-tagline = Limpia nodos de la nodedb de tu dispositivo
-about = Elimina nodos antiguos o parcialmente conocidos de la nodedb de un dispositivo Meshtastic.
+app-name = Meshtastic Node Manager
+app-tagline = Gestiona la nodedb de tu dispositivo
+about = Consulta y limpia la nodedb de un dispositivo Meshtastic.
 
 ## Ayuda de la línea de órdenes
 
 help-usage = Uso:
+heading-commands = Órdenes
 heading-connection = Conexión
 heading-selection = Selección (por defecto: --unknown)
 heading-output = Salida
 heading-action = Acción
+heading-arguments = Argumentos
+cmd-list = Mostrar la nodedb del dispositivo (orden por defecto)
+cmd-clean = Eliminar nodos parcialmente conocidos o antiguos
+cmd-remove = Eliminar nodos concretos
+cmd-favorite = Marcar nodos como favoritos
+cmd-unfavorite = Quitar nodos de favoritos
+cmd-ignore = Ignorar nodos
+cmd-unignore = Dejar de ignorar nodos
+cmd-set-time = Poner el reloj del dispositivo en la hora del sistema
 help-serial = Conectar por serie. DEVICE (p. ej. /dev/ttyUSB0) se detecta automáticamente si se omite. Nunca recurre a TCP
 help-tcp = Conectar por TCP. HOST puede ser host, host:puerto o http://host:puerto; por defecto localhost:4403. Nunca recurre a serie
 help-unknown = Seleccionar nodos parcialmente conocidos (sin NodeInfo completo). Es lo predeterminado si no se indica otra selección
 help-older-than = Seleccionar nodos que no se oyen desde hace más de DURATION (p. ej. 30m, 24h, 7d, 2w). Junto con --unknown, deben cumplirse ambas
 help-include-never = Con --older-than, seleccionar también los nodos sin hora de última escucha
-help-remove = Eliminar exactamente estos nodos (p. ej. !aabbccdd, 0xaabbccdd o un número decimal)
+help-nodes = Identificadores de nodo: !aabbccdd, 0xaabbccdd o un número decimal
 help-sort-by = Columna por la que ordenar la tabla
 help-reverse = Invertir el orden (fecha: los más antiguos primero; texto: Z→A)
 help-verbose = Aumentar el detalle (-v datos de conexión, -vv depuración)
 help-dry-run = Mostrar qué se eliminaría sin cambiar nada
 help-yes = Eliminar sin pedir confirmación
-help-set-time = Poner el reloj del dispositivo en la hora del sistema antes de leer la nodedb
 help-help = Mostrar la ayuda
 help-version = Mostrar la versión
 help-examples =
     Ejemplos:
-      meshtastic-node-cleaner                     Elimina los nodos parcialmente conocidos, detectando el dispositivo
-      meshtastic-node-cleaner -n                  Solo muestra qué se eliminaría
-      meshtastic-node-cleaner -s /dev/ttyUSB0     Usa un dispositivo serie concreto
-      meshtastic-node-cleaner -t 192.168.1.10     Conecta por TCP
-      meshtastic-node-cleaner -o 30d              Elimina los nodos que no se oyen desde hace 30 días
-      meshtastic-node-cleaner -u -o 7d            Elimina los parcialmente conocidos que no se oyen desde hace 7 días
-      meshtastic-node-cleaner -r '!aabbccdd'      Elimina un nodo concreto
+      meshtastic-node-manager                            Muestra la nodedb, detectando el dispositivo
+      meshtastic-node-manager -t 192.168.1.10            Muestra la nodedb de un dispositivo accesible por TCP
+      meshtastic-node-manager clean -n                   Muestra qué nodos parcialmente conocidos se eliminarían
+      meshtastic-node-manager clean -o 30d               Elimina los nodos que no se oyen desde hace 30 días
+      meshtastic-node-manager clean -u -o 7d             Elimina los parcialmente conocidos que no se oyen desde hace 7 días
+      meshtastic-node-manager remove '!aabbccdd'         Elimina un nodo concreto
+      meshtastic-node-manager unfavorite '!aabbccdd'     Quita un favorito para poder eliminarlo
 
     Los favoritos y los nodos ignorados nunca se eliminan.
+    Usa «meshtastic-node-manager <COMMAND> --help» para ver las opciones de cada orden.
 
 ## Errores de argumentos
 
@@ -94,8 +104,8 @@ legend-unknown = parcialmente conocido
 
 skip-not-found = { $id } no está en la nodedb.
 skip-own = { $id } es el nodo propio del dispositivo y no se puede eliminar.
-skip-favorite = { $id } es favorito y no se eliminará; desmárcalo antes.
-skip-ignored = { $id } está ignorado y no se eliminará; al borrarlo se perdería la marca de ignorado.
+skip-favorite = { $id } es favorito y no se eliminará; quítalo antes de favoritos con la orden unfavorite.
+skip-ignored = { $id } está ignorado y no se eliminará, porque se perdería la marca; usa antes la orden unignore.
 note-protected = { $count ->
     [one] Se conserva { $count } nodo que cumple la selección por ser favorito o estar ignorado.
    *[other] Se conservan { $count } nodos que cumplen la selección por ser favoritos o estar ignorados.
@@ -103,7 +113,7 @@ note-protected = { $count ->
 note-never-heard = { $count ->
     [one] Se conserva { $count } nodo sin hora de última escucha.
    *[other] Se conservan { $count } nodos sin hora de última escucha.
-} Probablemente el dispositivo no tenía la hora cuando los oyó. Usa --include-never para seleccionarlos también y --set-time para darle la hora actual al dispositivo.
+} Probablemente el dispositivo no tenía la hora cuando los oyó. Usa --include-never para seleccionarlos también y la orden set-time para darle la hora actual al dispositivo.
 
 ## Eliminación
 
@@ -129,3 +139,17 @@ result = { $total ->
     [one] { $removed } de { $total } nodo eliminado.
    *[other] { $removed } de { $total } nodos eliminados.
 }
+
+## Marcas de nodo
+
+flag-own = { $id } es el nodo propio del dispositivo; se omite.
+flag-unconfirmed = Cambio de { $id } ({ $name }) enviado, pero sin confirmar
+flag-failed = No se pudo cambiar { $id }: { $error }
+favorite-already = { $id } ya es favorito.
+favorite-not = { $id } no es favorito.
+favorite-added = Añadido { $id } ({ $name }) a favoritos
+favorite-removed = Quitado { $id } ({ $name }) de favoritos
+ignore-already = { $id } ya está ignorado.
+ignore-not = { $id } no está ignorado.
+ignore-added = Ahora se ignora { $id } ({ $name })
+ignore-removed = Ya no se ignora { $id } ({ $name })

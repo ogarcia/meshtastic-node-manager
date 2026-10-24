@@ -157,17 +157,24 @@ pub fn nodes_table(own: Option<&Node>, nodes: &[Node], now: u64) {
     }
 
     println!("{table}");
-    println!(
-        "{}",
-        style(format!(
-            "★ {} · ✗ {} · ♥ {} · ⊘ {} · ✦ {}",
-            fl!("legend-own"),
-            fl!("legend-delete"),
+    // Explain only the markers that appear in this table.
+    let shown = || own.into_iter().chain(nodes);
+    let legend: Vec<String> = [
+        (own.is_some(), "★", fl!("legend-own")),
+        (nodes.iter().any(|n| n.delete), "✗", fl!("legend-delete")),
+        (
+            nodes.iter().any(|n| n.favorite),
+            "♥",
             fl!("legend-favorite"),
-            fl!("legend-ignored"),
-            fl!("legend-unknown"),
-        ))
-        .dim()
-    );
+        ),
+        (nodes.iter().any(|n| n.ignored), "⊘", fl!("legend-ignored")),
+        (shown().any(|n| n.unknown), "✦", fl!("legend-unknown")),
+    ]
+    .into_iter()
+    .filter_map(|(present, marker, text)| present.then(|| format!("{marker} {text}")))
+    .collect();
+    if !legend.is_empty() {
+        println!("{}", style(legend.join(" · ")).dim());
+    }
     println!();
 }

@@ -1,5 +1,5 @@
-//! Meshtastic Node Cleaner — remove stale or partially-known nodes from a
-//! Meshtastic device's nodedb.
+//! Meshtastic Node Manager — inspect and clean the nodedb of a Meshtastic
+//! device.
 
 mod cli;
 mod device;
@@ -14,9 +14,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Result, anyhow};
 use console::style;
 
-use cli::Cli;
-use device::{DEFAULT_TCP_PORT, Device, Endpoint, Target};
-use nodes::{Selection, Skip, node_id};
+use cli::{Cli, Cmd, ConfirmArgs, ViewArgs};
+use device::{DEFAULT_TCP_PORT, Device, Endpoint, NodeFlag, Target};
+use nodes::{Node, Selection, Skip, node_id};
 
 fn main() -> ExitCode {
     let cli = cli::parse();
@@ -24,7 +24,7 @@ fn main() -> ExitCode {
     let level = ["warn", "info", "debug"][usize::from(cli.verbose.min(2))];
     env_logger::Builder::from_env(
         env_logger::Env::default()
-            .default_filter_or(format!("warn,meshtastic_node_cleaner={level}")),
+            .default_filter_or(format!("warn,meshtastic_node_manager={level}")),
     )
     .format_timestamp(None)
     .init();
@@ -54,8 +54,8 @@ fn now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// Connect, show the plan and remove the selected nodes.  Returns whether
-/// every requested action succeeded.
+/// Connect and run the requested command.  Returns whether every requested
+/// action succeeded.
 async fn run(cli: &Cli) -> Result<bool> {
     display::banner();
 
@@ -64,7 +64,7 @@ async fn run(cli: &Cli) -> Result<bool> {
         .await
         .map_err(|e| e.context(fl!("error-connect")))?;
 
-    let result = clean(cli, &mut device).await;
+    let result = execute(cli.action(), &mut device).await;
     // Always release the serial port or socket, but report the first error.
     let closed = device.disconnect().await;
     let ok = result?;
@@ -111,42 +111,80 @@ fn resolve_endpoint(target: &Target) -> Result<Endpoint> {
     Ok(endpoint)
 }
 
-async fn clean(cli: &Cli, device: &mut Device) -> Result<bool> {
-    let mut ok = true;
-
-    if cli.set_time {
-        let now = u32::try_from(now()).unwrap_or(u32::MAX);
-        match device.set_time(now).await {
-            Ok(true) => println!("{}", style(fl!("time-set")).green()),
-            Ok(false) => println!("{}", style(fl!("time-set-unconfirmed")).yellow()),
-            Err(e) => {
-                eprintln!("{} {e:#}", style(fl!("error-set-time")).red());
-                ok = false;
-            }
+async fn execute(command: Cmd, device: &mut Device) -> Result<bool> {
+    use NodeFlag::{Favorite, Ignored};
+    match command {
+        Cmd::List(view) => {
+            list(device, &view);
+            Ok(true)
         }
+        Cmd::Clean(args) => {
+            remove_nodes(device, &args.selection(), &args.view, &args.confirm).await
+        }
+        Cmd::Remove(args) => {
+            let selection = Selection::Explicit(args.nodes);
+            remove_nodes(device, &selection, &ViewArgs::default(), &args.confirm).await
+        }
+        Cmd::Favorite(args) => Ok(change_flag(device, Favorite, true, &args.nodes).await),
+        Cmd::Unfavorite(args) => Ok(change_flag(device, Favorite, false, &args.nodes).await),
+        Cmd::Ignore(args) => Ok(change_flag(device, Ignored, true, &args.nodes).await),
+        Cmd::Unignore(args) => Ok(change_flag(device, Ignored, false, &args.nodes).await),
+        Cmd::SetTime => Ok(set_time(device).await),
     }
+}
 
-    let selection = cli.selection();
-    let now = now();
-    let mut plan = nodes::plan(&device.nodes, device.my_node_num, &selection, now);
-    nodes::sort_nodes(&mut plan.nodes, cli.sort_by, cli.reverse);
-
+fn print_summary(device: &Device) {
     println!(
         "{}",
         style(fl!("nodedb-summary", count = device.nodes.len())).cyan()
     );
     println!();
+}
 
+fn empty_nodedb() {
+    display::panel(
+        &style(fl!("nodedb-empty")).yellow().to_string(),
+        console::Color::Yellow,
+    );
+}
+
+/// Show the whole nodedb.
+fn list(device: &Device, view: &ViewArgs) {
+    print_summary(device);
+    let own = device.nodes.get(&device.my_node_num).map(Node::from_info);
+    let mut others: Vec<Node> = device
+        .nodes
+        .values()
+        .filter(|n| n.num != device.my_node_num)
+        .map(Node::from_info)
+        .collect();
+    if others.is_empty() {
+        empty_nodedb();
+        return;
+    }
+    nodes::sort_nodes(&mut others, view.sort_by, view.reverse);
+    display::nodes_table(own.as_ref(), &others, now());
+}
+
+/// Show the nodes matching `selection` and remove them after confirmation.
+async fn remove_nodes(
+    device: &mut Device,
+    selection: &Selection,
+    view: &ViewArgs,
+    confirmation: &ConfirmArgs,
+) -> Result<bool> {
+    let now = now();
+    let mut plan = nodes::plan(&device.nodes, device.my_node_num, selection, now);
+    nodes::sort_nodes(&mut plan.nodes, view.sort_by, view.reverse);
+
+    print_summary(device);
     if plan.nodes.is_empty() && plan.skipped.is_empty() {
-        display::panel(
-            &style(fl!("nodedb-empty")).yellow().to_string(),
-            console::Color::Yellow,
-        );
-        return Ok(ok);
+        empty_nodedb();
+        return Ok(true);
     }
 
     let to_delete = plan.delete_count();
-    println!("{}", style(selection_title(&selection, to_delete)).bold());
+    println!("{}", style(selection_title(selection, to_delete)).bold());
     if !plan.nodes.is_empty() {
         let own = matches!(selection, Selection::Filter { .. })
             .then_some(plan.own.as_ref())
@@ -156,21 +194,25 @@ async fn clean(cli: &Cli, device: &mut Device) -> Result<bool> {
         println!();
     }
 
-    print_notes(&plan, &selection);
+    print_notes(&plan, selection);
 
     if to_delete == 0 {
-        display::panel(
-            &format!(
-                "{} {}",
-                style(fl!("all-clean")).green().bold(),
-                fl!("nothing-to-delete")
-            ),
-            console::Color::Green,
-        );
-        return Ok(ok);
+        if matches!(selection, Selection::Explicit(_)) {
+            display::panel(&fl!("nothing-to-delete"), console::Color::Yellow);
+        } else {
+            display::panel(
+                &format!(
+                    "{} {}",
+                    style(fl!("all-clean")).green().bold(),
+                    fl!("nothing-to-delete")
+                ),
+                console::Color::Green,
+            );
+        }
+        return Ok(true);
     }
 
-    if cli.dry_run {
+    if confirmation.dry_run {
         display::panel(
             &format!(
                 "{} {}",
@@ -179,14 +221,15 @@ async fn clean(cli: &Cli, device: &mut Device) -> Result<bool> {
             ),
             console::Color::Yellow,
         );
-        return Ok(ok);
+        return Ok(true);
     }
 
-    if !cli.yes && !confirm(&fl!("confirm", count = to_delete))? {
+    if !confirmation.yes && !confirm(&fl!("confirm", count = to_delete))? {
         println!("{}", style(fl!("cancelled")).yellow());
-        return Ok(ok);
+        return Ok(true);
     }
 
+    let mut ok = true;
     let mut removed = 0;
     for node in plan.to_delete() {
         let name = node.long_name.clone().unwrap_or_else(|| "—".into());
@@ -227,6 +270,86 @@ async fn clean(cli: &Cli, device: &mut Device) -> Result<bool> {
         },
     );
     Ok(ok)
+}
+
+/// Set (`on`) or clear a flag on each of `nums`.  Returns whether every
+/// change succeeded.
+async fn change_flag(device: &mut Device, flag: NodeFlag, on: bool, nums: &[u32]) -> bool {
+    let mut ok = true;
+    let mut seen = Vec::new();
+    for &num in nums {
+        if seen.contains(&num) {
+            continue;
+        }
+        seen.push(num);
+
+        let id = node_id(num);
+        let Some(info) = device.nodes.get(&num) else {
+            println!("{}", style(fl!("skip-not-found", id = id)).yellow());
+            continue;
+        };
+        if num == device.my_node_num {
+            println!("{}", style(fl!("flag-own", id = id)).yellow());
+            continue;
+        }
+        let current = match flag {
+            NodeFlag::Favorite => info.is_favorite,
+            NodeFlag::Ignored => info.is_ignored,
+        };
+        if current == on {
+            let msg = match (flag, on) {
+                (NodeFlag::Favorite, true) => fl!("favorite-already", id = id),
+                (NodeFlag::Favorite, false) => fl!("favorite-not", id = id),
+                (NodeFlag::Ignored, true) => fl!("ignore-already", id = id),
+                (NodeFlag::Ignored, false) => fl!("ignore-not", id = id),
+            };
+            println!("{}", style(msg).yellow());
+            continue;
+        }
+        let name = Node::from_info(info)
+            .long_name
+            .unwrap_or_else(|| "—".into());
+
+        match device.set_flag(num, flag, on).await {
+            Ok(true) => {
+                let msg = match (flag, on) {
+                    (NodeFlag::Favorite, true) => fl!("favorite-added", id = id, name = name),
+                    (NodeFlag::Favorite, false) => fl!("favorite-removed", id = id, name = name),
+                    (NodeFlag::Ignored, true) => fl!("ignore-added", id = id, name = name),
+                    (NodeFlag::Ignored, false) => fl!("ignore-removed", id = id, name = name),
+                };
+                println!("  {} {msg}", style("✓").green());
+            }
+            Ok(false) => println!(
+                "  {} {}",
+                style("?").yellow(),
+                fl!("flag-unconfirmed", id = id, name = name)
+            ),
+            Err(e) => {
+                ok = false;
+                println!(
+                    "  {} {}",
+                    style("✗").red(),
+                    fl!("flag-failed", id = id, error = format!("{e:#}"))
+                );
+            }
+        }
+    }
+    ok
+}
+
+/// Set the device clock to the system time.
+async fn set_time(device: &mut Device) -> bool {
+    let now = u32::try_from(now()).unwrap_or(u32::MAX);
+    match device.set_time(now).await {
+        Ok(true) => println!("{}", style(fl!("time-set")).green()),
+        Ok(false) => println!("{}", style(fl!("time-set-unconfirmed")).yellow()),
+        Err(e) => {
+            eprintln!("{} {e:#}", style(fl!("error-set-time")).red());
+            return false;
+        }
+    }
+    true
 }
 
 fn selection_title(selection: &Selection, count: usize) -> String {
